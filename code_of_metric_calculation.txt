@@ -1,0 +1,177 @@
+# 整合所有绿地信息，计算每个绿地的最远距离和最大温差
+
+import tkinter
+import numpy as np
+from tkinter import filedialog
+import pandas as pd
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+import math
+import os
+from sklearn.metrics import r2_score
+import statsmodels.api as sm
+from scipy import stats
+import datetime
+
+time = '20240514'
+# 内含参数
+index = 0  # 拟合范围选取
+threshold = 0.3  # R方筛选阈值
+max = 126  # 大于100则用三倍标准差方法进行极端CI和CD的筛选去除
+equal = 0  # 为0则去除极端CI和CD时不保留边缘值（用>而非>=）
+
+
+def function1(x, a, b, c, d):
+    return a * x * x * x + b * x * x + c * x + d
+
+# 拟合距离相关参数
+distance_y_list = [['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m','300m'],
+                 ['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m'],
+['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m', '360m'],
+['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m', '360m', '390m'],
+['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m', '360m', '390m', '420m'],
+['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m', '360m', '390m', '420m', '450m'],
+['0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m', '300m', '330m', '360m', '390m', '420m', '450m', '480m']]
+distance_x_list = [range(15, 330, 30),range(15, 360, 30),range(15, 390, 30),range(15, 420, 30),range(15, 450, 30),range(15, 480, 30),range(15, 510, 30)]
+distance_head_list = [315, 345, 375, 405, 435, 465, 495]
+
+# 输入输出
+input = "D:\greenspacedata\\"+ time + "/2green_attri/"  # 包含所有greenattri的文件夹
+output = "D:\greenspacedata\\"+ time + "/3green_filter/"  # 输出路径
+
+city_file = pd.read_csv(r'D:\greenspacedata\20240514\0climate\city_attri_allkinds.csv')  # cityattri数据
+climatezone = pd.read_csv(r'D:\greenspacedata\20240514\0climate\climate.csv')
+continent = pd.read_csv(r'D:\greenspacedata\20240514\0climate\continent.csv')
+city_file = pd.merge(city_file, climatezone, how='left', left_on='ORIG_FID', right_on='ORIG_FID')
+city_file = pd.merge(city_file, continent[['cityid','continent']], how='left', left_on='ORIG_FID', right_on='cityid')
+
+# 删除空文件
+for filename in os.listdir(input):
+    print(filename)
+    if os.path.getsize(input + filename)==1:
+        os.remove(input + filename)
+
+# 筛选整合绿地数据
+green_file = pd.DataFrame()
+for filename in os.listdir(input):
+    print(filename)
+    cityid = filename.split("_")[0]
+    print(cityid)
+    file = pd.read_csv(input + filename)
+    file = file.dropna()
+    file = file.astype(float)
+    file = file.reset_index(drop=True)
+
+    # 在范围内曲线拟合及赋值
+    file.loc[:, 'max_d'] = -1
+    file.loc[:, 'max_t'] = -1
+    file.loc[:, 'r2'] = -1
+    LST_data = file[distance_y_list[index]]
+    distance = distance_x_list[index]
+    for i in range(len(LST_data)):
+        LST_data_i = LST_data.loc[[i]].mean()
+        pwd = math.sqrt(float(file.loc[i, 'area']))
+        X = distance
+        # print(X)
+        Y = LST_data_i
+        # print(Y)
+        max_d = -1
+        max_t = -1
+        r2 = -1
+        popt, pcov = curve_fit(function1, X, Y, maxfev=8000)
+        r2 = r2_score(Y, popt[0] * X * X * X + popt[1] * X * X + popt[2] * X + popt[3])
+        file.loc[i, 'r2'] = r2
+        file.loc[i, 'a'] = popt[0]
+        file.loc[i, 'b'] = popt[1]
+        file.loc[i, 'c'] = popt[2]
+        file.loc[i, 'd'] = popt[3]
+        a = 3 * popt[0]
+        b = 2 * popt[1]
+        c = popt[2]
+        delta = b * b - 4 * a * c
+        # 绿地边缘导数小于0则不存在降温效应
+        if delta > 0:  # 双峰
+            tp_x = (0 - b - math.sqrt(delta)) / 2 / a
+            if tp_x <= distance_head_list[index] and tp_x > 0 and tp_x <= 2 * pwd:  # 最大值峰在拟合范围内
+                max_d = tp_x
+                max_t = popt[0] * max_d * max_d * max_d + popt[1] * max_d * max_d + popt[2] * max_d + popt[3] \
+                        - float(file.loc[i, 'mean_lst_inside'])
+        else:  # 不存在峰值
+            if a < 0:  # 持续下降，不存在降温效应
+                max_d = -2
+            else:
+                max_d = -3
+        file.loc[i, 'max_d'] = max_d
+        file.loc[i, 'max_t'] = max_t
+
+    # 筛选R方大于阈值的绿地
+    file = file[file['r2'] > threshold]
+
+    # 计算non_cool数据
+    print(cityid, '不呈现降温效应的绿地数量', len(file[file['max_d'] == -2]))
+    file.loc[:, 'non_cool'] = len(file[file['max_d'] == -2])
+
+    # 筛选保留呈现降温效应的绿地
+    file = file[file['max_d'] > 0]
+    file = file[file['max_t'] > 0]
+
+    # 筛选去除上下percentile
+    final = pd.DataFrame()
+    if max <= 100:
+        for area_num in range(10000, 1000000, 10000):
+            file_area = file[file['area'] > area_num]
+            file_area = file_area[file_area['area'] <= area_num + 10000]
+            if not file_area.empty:
+                t90 = np.percentile(np.array(file_area['max_t']), max)
+                t10 = np.percentile(np.array(file_area['max_t']), 100 - max)
+                d90 = np.percentile(np.array(file_area['max_d']), max)
+                d10 = np.percentile(np.array(file_area['max_d']), 100 - max)
+                if equal == 0:
+                    file_area = file_area[file_area['max_t'] < t90]
+                    file_area = file_area[file_area['max_t'] > t10]
+                    file_area = file_area[file_area['max_d'] < d90]
+                    file_area = file_area[file_area['max_d'] > d10]
+                else:
+                    file_area = file_area[file_area['max_t'] <= t90]
+                    file_area = file_area[file_area['max_t'] >= t10]
+                    file_area = file_area[file_area['max_d'] <= d90]
+                    file_area = file_area[file_area['max_d'] >= d10]
+                final = pd.concat([final, file_area], axis=0)
+    else:
+        t90 = file['max_t'].mean() + 3 * file['max_t'].std()
+        d90 = file['max_d'].mean() + 3 * file['max_d'].std()
+        if equal == 0:
+            final = file[file['max_t'] < t90]
+            final = final[final['max_d'] < d90]
+        else:
+            final = file[file['max_t'] <= t90]
+            final = final[final['max_d'] <= d90]
+
+    final = final.reset_index(drop=True)
+
+    # 计算have_turning_point数据
+    if not final.empty:
+        print(cityid, '识别出转折点的绿地数量', len(final))
+        final.loc[:, 'have_turning_point'] = len(final)
+        green_file = pd.concat([green_file, final], axis=0)
+
+# 绿地合并城市层面的数据并输出
+green_file = green_file.dropna()
+green_file = green_file.reset_index(drop=True)
+
+green_file = pd.merge(green_file, city_file[['ORIG_FID','urbanArea', 'Albedo','Evapotranspiration','Specific_humidity','Total_precipitation_rate','Rain_precipitation_rate','Air_temperature','Wind_speed','era5h11_temperature_2m','era5h11_total_precipitation','era5h11_total_precipitation_hourly','era5h11_wind_10m','era5m_temperature_2m','era5m_temperature_2m_max','era5m_temperature_2m_min','era5m_total_precipitation_sum','era5m_wind_10m','pop','Type','continent']],
+                      how='left', left_on='cityid', right_on='ORIG_FID')
+green_file = green_file[['cityid', 'area', 'peri','lsi','lnarea','lnlsi','NDVI','imp',
+                         'urbanArea', 'Albedo','Evapotranspiration','Specific_humidity','Total_precipitation_rate','Rain_precipitation_rate','Air_temperature','Wind_speed','era5h11_temperature_2m','era5h11_total_precipitation','era5h11_total_precipitation_hourly','era5h11_wind_10m','era5m_temperature_2m','era5m_temperature_2m_max','era5m_temperature_2m_min','era5m_total_precipitation_sum','era5m_wind_10m','pop','Type','continent',
+                         'max_d','max_t',
+                         'green_space_num', 'non_cool', 'have_turning_point',
+                        'r2', 'mean_lst_inside','0m', '30m', '60m', '90m', '120m', '150m', '180m', '210m', '240m', '270m',
+                 '300m', '330m', '360m', '390m', '420m', '450m', '480m', 'a', 'b', 'c', 'd']]
+
+equal_text = 'equal'
+if equal == 0:
+    equal_text = 'no_equal'
+
+# green_file.to_csv(output + 'green_filter_' + str(index) + '_' + str(threshold) + '_' + str(max) + equal_text + '.csv', index=None)
